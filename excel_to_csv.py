@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 from typing import Optional
 
@@ -233,7 +234,8 @@ def run_web() -> None:
             mimetype="text/csv",
         )
 
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
 
 
 def main() -> None:
