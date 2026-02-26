@@ -1,14 +1,34 @@
 import io
+import csv
 import os
 import sys
+import tempfile
+import warnings
 from typing import Optional
 
 import pandas as pd
 
+warnings.filterwarnings('ignore')
+
 
 def excel_to_csv(xlsx_path: str, csv_path: str) -> None:
-    df = pd.read_excel(xlsx_path, header=None)
-    df.to_csv(csv_path, index=False, header=False)
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        df = pd.read_excel(xlsx_path, header=None)
+        df.to_csv(csv_path, index=False, header=False)
+        return
+    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    ws = wb.active
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        for row in ws.iter_rows(values_only=True):
+            if row is None:
+                continue
+            if all(cell is None or (isinstance(cell, str) and cell.strip() == "") for cell in row):
+                continue
+            writer.writerow([("" if cell is None else cell) for cell in row])
+    wb.close()
 
 
 def format_english_header(xlsx_path: str, output_path: Optional[str] = None) -> None:
@@ -220,19 +240,50 @@ def run_web() -> None:
         if not uploaded_file or uploaded_file.filename == "":
             return render_template_string(template, error="Please choose an Excel file.")
 
-        df = pd.read_excel(uploaded_file, header=None)
-        output = io.StringIO()
-        df.to_csv(output, index=False, header=False)
-        output.seek(0)
+        # Create a temporary file for the output CSV to save memory
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_csv:
+            tmp_csv_path = tmp_csv.name
 
-        filename = uploaded_file.filename.rsplit(".", 1)[0] + ".csv"
+        try:
+            # Save uploaded file to temp file to ensure pandas can read it efficiently
+            # Use mkstemp to avoid Windows permission errors with open files
+            fd, tmp_xlsx_path = tempfile.mkstemp(suffix=".xlsx")
+            os.close(fd)  # Close the file descriptor immediately
+            uploaded_file.save(tmp_xlsx_path)
 
-        return send_file(
-            io.BytesIO(output.getvalue().encode("utf-8")),
-            as_attachment=True,
-            download_name=filename,
-            mimetype="text/csv",
-        )
+            # Convert using the optimized function
+            excel_to_csv(tmp_xlsx_path, tmp_csv_path)
+            
+            # Clean up input file
+            if os.path.exists(tmp_xlsx_path):
+                os.unlink(tmp_xlsx_path)
+
+            filename = uploaded_file.filename.rsplit(".", 1)[0] + ".csv"
+
+            # Return the file using send_file which is efficient for files
+            # Note: We can't easily delete the temp CSV after sending with send_file in this simple setup
+            # without a cleanup callback, but OS cleans temp files eventually or we rely on small scale.
+            # For better cleanup, we could read bytes and delete, but that defeats memory purpose.
+            # Let's read into memory for response if it's not TOO huge, or use a generator.
+            # However, standard send_file is safest for now. 
+            # To ensure cleanup, we can read it back and delete.
+            
+            with open(tmp_csv_path, 'rb') as f:
+                data = io.BytesIO(f.read())
+            
+            os.unlink(tmp_csv_path)
+            
+            return send_file(
+                data,
+                as_attachment=True,
+                download_name=filename,
+                mimetype="text/csv",
+            )
+            
+        except Exception as e:
+            if os.path.exists(tmp_csv_path):
+                os.unlink(tmp_csv_path)
+            return render_template_string(template, error=f"Error processing file: {str(e)}")
 
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
